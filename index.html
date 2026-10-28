@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appel Gratuit</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #1a1d21; --muted: #5f6b76;
+    --green: #1e9e57; --red: #d93a3a; --blue: #2468d6; --border: #d9dee3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121417; --card: #1c2025; --text: #eef1f4; --muted: #9aa5b0; --border: #2e343b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    font-size: 20px; line-height: 1.4;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 30px; margin: 0 0 20px; text-align: center; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 8px; }
+  input {
+    width: 100%; font-size: 22px; padding: 14px; border-radius: 12px;
+    border: 2px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  button {
+    width: 100%; font-size: 22px; font-weight: 700; padding: 18px; margin-top: 12px;
+    border: 0; border-radius: 14px; color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .green { background: var(--green); }
+  .red { background: var(--red); }
+  .blue { background: var(--blue); }
+  .grey { background: var(--muted); }
+  .myid { font-size: 28px; font-weight: 800; text-align: center; letter-spacing: 1px; }
+  .status { text-align: center; color: var(--muted); min-height: 28px; }
+  .hidden { display: none; }
+  .timer { font-size: 40px; font-weight: 800; text-align: center; }
+  .ring { animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>📞 Appel Gratuit</h1>
+
+  <!-- Étape 1 : choisir son nom -->
+  <section id="setup" class="card">
+    <label for="name">Ton nom (ex : oncle-paul)</label>
+    <input id="name" autocomplete="off" autocapitalize="off">
+    <button class="blue" id="saveName">Commencer</button>
+  </section>
+
+  <!-- Étape 2 : prêt à appeler -->
+  <section id="ready" class="hidden">
+    <div class="card">
+      <div class="status">Ton nom pour être appelé :</div>
+      <div class="myid" id="myId"></div>
+      <div class="status" id="netStatus">Connexion…</div>
+    </div>
+    <div class="card">
+      <label for="friend">Nom de la personne à appeler</label>
+      <input id="friend" autocomplete="off" autocapitalize="off">
+      <button class="green" id="callBtn">📞 Appeler</button>
+    </div>
+    <button class="grey" id="changeName">Changer mon nom</button>
+  </section>
+
+  <!-- Appel entrant -->
+  <section id="incoming" class="card hidden">
+    <div class="myid ring" id="callerName"></div>
+    <div class="status">t'appelle…</div>
+    <button class="green" id="acceptBtn">✅ Répondre</button>
+    <button class="red" id="rejectBtn">❌ Refuser</button>
+  </section>
+
+  <!-- En appel -->
+  <section id="inCall" class="card hidden">
+    <div class="status" id="callWith"></div>
+    <div class="timer" id="timer">00:00</div>
+    <button class="grey" id="muteBtn">🔇 Couper mon micro</button>
+    <button class="red" id="hangupBtn">Raccrocher</button>
+  </section>
+
+  <audio id="remoteAudio" autoplay playsinline></audio>
+</main>
+
+<script>
+const PREFIX = "appelgratuit-v1-"; // évite les collisions avec d'autres apps PeerJS
+const $ = id => document.getElementById(id);
+let peer, currentCall, localStream, timerId, incomingCall;
+
+function clean(s) {
+  return s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function show(id) {
+  for (const s of ["setup", "ready", "incoming", "inCall"]) $(s).classList.toggle("hidden", s !== id);
+}
+function load(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function store(key, v) { try { v == null ? localStorage.removeItem(key) : localStorage.setItem(key, v); } catch {} }
+
+async function getMic() {
+  if (!localStream) {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  }
+  return localStream;
+}
+
+function start(name) {
+  $("myId").textContent = name;
+  $("netStatus").textContent = "Connexion…";
+  show("ready");
+  if (peer) peer.destroy();
+  peer = new Peer(PREFIX + name);
+  peer.on("open", () => $("netStatus").textContent = "✅ Prêt à appeler et recevoir");
+  peer.on("disconnected", () => { $("netStatus").textContent = "Reconnexion…"; peer.reconnect(); });
+  peer.on("error", err => {
+    if (err.type === "unavailable-id") $("netStatus").textContent = "⚠️ Ce nom est déjà pris, choisis-en un autre.";
+    else if (err.type === "peer-unavailable") { alert("Cette personne n'est pas connectée en ce moment."); endCall(); }
+    else $("netStatus").textContent = "⚠️ Erreur : " + err.type;
+  });
+  peer.on("call", call => {
+    if (currentCall) { call.close(); return; } // déjà en ligne
+    incomingCall = call;
+    $("callerName").textContent = call.peer.replace(PREFIX, "");
+    show("incoming");
+  });
+}
+
+function attach(call) {
+  currentCall = call;
+  $("callWith").textContent = "En appel avec " + call.peer.replace(PREFIX, "");
+  $("timer").textContent = "Appel en cours…";
+  show("inCall");
+  call.on("stream", stream => {
+    $("remoteAudio").srcObject = stream;
+    const t0 = Date.now();
+    clearInterval(timerId);
+    timerId = setInterval(() => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      $("timer").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+    }, 1000);
+  });
+  call.on("close", endCall);
+  call.on("error", endCall);
+}
+
+function endCall() {
+  clearInterval(timerId);
+  if (currentCall) { const c = currentCall; currentCall = null; c.close(); }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  $("remoteAudio").srcObject = null;
+  $("muteBtn").textContent = "🔇 Couper mon micro";
+  show("ready");
+}
+
+$("saveName").onclick = () => {
+  const name = clean($("name").value);
+  if (!name) return alert("Écris un nom.");
+  store("name", name);
+  start(name);
+};
+$("changeName").onclick = () => { store("name", null); if (peer) peer.destroy(); show("setup"); };
+
+$("callBtn").onclick = async () => {
+  const friend = clean($("friend").value);
+  if (!friend) return alert("Écris le nom de la personne.");
+  store("lastFriend", friend);
+  try { attach(peer.call(PREFIX + friend, await getMic())); }
+  catch { alert("Il faut autoriser le micro pour appeler."); }
+};
+$("acceptBtn").onclick = async () => {
+  try { incomingCall.answer(await getMic()); attach(incomingCall); }
+  catch { alert("Il faut autoriser le micro pour répondre."); incomingCall.close(); show("ready"); }
+  incomingCall = null;
+};
+$("rejectBtn").onclick = () => { incomingCall.close(); incomingCall = null; show("ready"); };
+$("hangupBtn").onclick = endCall;
+$("muteBtn").onclick = () => {
+  if (!localStream) return;
+  const track = localStream.getAudioTracks()[0];
+  track.enabled = !track.enabled;
+  $("muteBtn").textContent = track.enabled ? "🔇 Couper mon micro" : "🎤 Réactiver mon micro";
+};
+
+$("friend").value = load("lastFriend") || "";
+const saved = load("name");
+if (saved) start(saved); else show("setup");
+</script>
+</body>
+</html>
